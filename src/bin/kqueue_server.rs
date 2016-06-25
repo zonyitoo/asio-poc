@@ -13,38 +13,55 @@ fn set_nonblock(fd: RawFd) -> nix::Result<()> {
     let flags = try!(fcntl(fd, FcntlArg::F_GETFL));
     let mut flags = OFlag::from_bits_truncate(flags);
     flags.insert(O_NONBLOCK);
-    try!(fcntl(fd, FcntlArg::F_SETFL(flags)));
-
-    Ok(())
+    fcntl(fd, FcntlArg::F_SETFL(flags)).and(Ok(()))
 }
 
-fn add_ev(kfd: RawFd, fd: RawFd, filter: EventFilter) -> nix::Result<()> {
-    let mut evs: [KEvent; 1] = unsafe { mem::uninitialized() };
-    ev_set(&mut evs[0],
-           fd as usize,
-           filter,
-           EV_ADD | EV_ENABLE,
-           FilterFlag::empty(),
-           fd as usize);
-
-    let mut elist: [KEvent; 0] = [];
-    let r = try!(kevent(kfd, &evs, &mut elist, 0));
-    assert_eq!(r, 0);
-    Ok(())
+struct Kqueue {
+    fd: RawFd,
 }
 
-fn del_ev(kfd: RawFd, fd: RawFd, filter: EventFilter) -> nix::Result<()> {
-    let mut evs: [KEvent; 1] = unsafe { mem::uninitialized() };
-    ev_set(&mut evs[0],
-           fd as usize,
-           filter,
-           EV_DELETE,
-           FilterFlag::empty(),
-           fd as usize);
+impl Kqueue {
+    fn new() -> nix::Result<Kqueue> {
+        Ok(Kqueue { fd: try!(kqueue()) })
+    }
 
-    let r = try!(kevent(kfd, &evs, &mut [], 0));
-    assert_eq!(r, 0);
-    Ok(())
+    fn add_ev(&self, fd: RawFd, filter: EventFilter) -> nix::Result<()> {
+        let ev = KEvent {
+            ident: fd as _,
+            filter: filter,
+            flags: EV_ADD | EV_ENABLE,
+            fflags: FilterFlag::empty(),
+            data: 0,
+            udata: fd as _,
+        };
+        let changelist: [KEvent; 1] = [ev];
+        let mut eventlist: [KEvent; 0] = [];
+        kevent(self.fd, &changelist, &mut eventlist, 0).and(Ok(()))
+    }
+
+    fn del_ev(&self, fd: RawFd, filter: EventFilter) -> nix::Result<()> {
+        let ev = KEvent {
+            ident: fd as _,
+            filter: filter,
+            flags: EV_DELETE,
+            fflags: FilterFlag::empty(),
+            data: 0,
+            udata: fd as _,
+        };
+        let changelist: [KEvent; 1] = [ev];
+        let mut eventlist: [KEvent; 0] = [];
+        kevent(self.fd, &changelist, &mut eventlist, 0).and(Ok(()))
+    }
+
+    fn poll(&self, eventlist: &mut [KEvent], timeout: usize) -> nix::Result<usize> {
+        kevent(self.fd, &[], eventlist, timeout).map(|n| n as usize)
+    }
+}
+
+impl Drop for Kqueue {
+    fn drop(&mut self) {
+        let _ = close(self.fd);
+    }
 }
 
 struct Client {
@@ -69,32 +86,33 @@ impl Drop for Client {
 }
 
 struct Server {
-    kfd: RawFd,
+    kqueue: Kqueue,
     lfd: RawFd,
     clients: HashMap<RawFd, Client>,
 }
 
 impl Server {
     fn new(addr: SockAddr) -> nix::Result<Server> {
-        let kfd = try!(kqueue());
+        let kqueue = try!(Kqueue::new());
         let lfd = try!(socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), 0));
         try!(set_nonblock(lfd));
 
         try!(bind(lfd, &addr));
         try!(listen(lfd, 128));
 
-        try!(add_ev(kfd, lfd, EventFilter::EVFILT_READ));
+        try!(kqueue.add_ev(lfd, EventFilter::EVFILT_READ));
 
         Ok(Server {
-            kfd: kfd,
+            kqueue: kqueue,
             lfd: lfd,
             clients: HashMap::new(),
         })
     }
 
     fn run_once(&mut self, timeout: usize) -> nix::Result<()> {
-        let mut evs: [KEvent; 64] = unsafe { mem::uninitialized() };
-        let n = try!(kevent(self.kfd, &[], &mut evs, timeout));
+        let mut evs: [KEvent; 128] = unsafe { mem::uninitialized() };
+        let n = try!(self.kqueue.poll(&mut evs, timeout));
+
         for ev in &evs[..n] {
             let fd = ev.udata as RawFd;
 
@@ -138,7 +156,7 @@ impl Server {
             match accept(self.lfd) {
                 Ok(fd) => {
                     let c = try!(Client::new(fd));
-                    try!(add_ev(self.kfd, fd, EventFilter::EVFILT_READ));
+                    try!(self.kqueue.add_ev(fd, EventFilter::EVFILT_READ));
                     // try!(add_ev(self.kfd, fd, EventFilter::EVFILT_WRITE));
                     self.clients.insert(fd, c);
 
@@ -192,8 +210,8 @@ impl Server {
         if should_close {
             try!(self.close_client(cfd));
         } else {
-            try!(del_ev(self.kfd, cfd, EventFilter::EVFILT_READ));
-            try!(add_ev(self.kfd, cfd, EventFilter::EVFILT_WRITE));
+            try!(self.kqueue.del_ev(cfd, EventFilter::EVFILT_READ));
+            try!(self.kqueue.add_ev(cfd, EventFilter::EVFILT_WRITE));
         }
 
         Ok(())
@@ -242,16 +260,16 @@ impl Server {
         if should_close {
             try!(self.close_client(cfd))
         } else {
-            try!(add_ev(self.kfd, cfd, EventFilter::EVFILT_READ));
-            try!(del_ev(self.kfd, cfd, EventFilter::EVFILT_WRITE));
+            try!(self.kqueue.add_ev(cfd, EventFilter::EVFILT_READ));
+            try!(self.kqueue.del_ev(cfd, EventFilter::EVFILT_WRITE));
         }
 
         Ok(())
     }
 
     fn close_client(&mut self, cfd: RawFd) -> nix::Result<()> {
-        try!(del_ev(self.kfd, cfd, EventFilter::EVFILT_READ));
-        try!(del_ev(self.kfd, cfd, EventFilter::EVFILT_WRITE));
+        try!(self.kqueue.del_ev(cfd, EventFilter::EVFILT_READ));
+        try!(self.kqueue.del_ev(cfd, EventFilter::EVFILT_WRITE));
 
         self.clients.remove(&cfd);
         println!("[ TRACE ] Client {:?} closed", cfd);
@@ -263,7 +281,6 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = close(self.lfd);
-        let _ = close(self.kfd);
     }
 }
 
@@ -273,5 +290,4 @@ fn main() {
 
     println!("[ TRACE ] Server running ...");
     while let Ok(..) = server.run_once(0) {}
-
 }
