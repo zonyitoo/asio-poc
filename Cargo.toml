@@ -3,4 +3,9 @@ name = "asio-poc"
 version = "0.1.0"
 authors = ["Y. T. Chung <zonyitoo@gmail.com>"]
 
+[[bin]]
+path = "src/bin/kqueue_server.rs"
+name = "kqueue-server"
+
 [dependencies]
+nix = "^0"
