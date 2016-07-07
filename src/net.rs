@@ -1,60 +1,80 @@
 use std::io;
-use std::net::ToSocketAddrs;
+use std::net;
 use std::os::unix::io::{RawFd, FromRawFd};
+
+use nix::fcntl;
+use nix::sys::socket;
+use nix;
 
 use ::IoContext;
 
-fn set_nonblock(fd: RawFd) -> nix::Result<()> {
-    let flags = try!(fcntl(fd, FcntlArg::F_GETFL));
-    let mut flags = OFlag::from_bits_truncate(flags);
-    flags.insert(O_NONBLOCK);
-    fcntl(fd, FcntlArg::F_SETFL(flags)).and(Ok(()))
+fn set_nonblock(fd: RawFd) -> io::Result<()> {
+    let flags = try!(fcntl::fcntl(fd, fcntl::FcntlArg::F_GETFL));
+
+    let mut flags = fcntl::OFlag::from_bits_truncate(flags);
+    flags.insert(fcntl::O_NONBLOCK);
+
+    try!(fcntl::fcntl(fd, fcntl::FcntlArg::F_SETFL(flags)));
+
+    Ok(())
 }
 
-struct TcpSocket {
+pub struct TcpStream<'ctx> {
+    io_context: &'ctx IoContext,
     fd: RawFd,
 }
 
-impl FromRawFd for TcpSocket {
-    unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        let socket = TcpSocket { fd: fd };
-    }
-}
+impl<'ctx> TcpStream<'ctx> {
+    pub unsafe fn from_raw_fd(io_context: &'ctx IoContext, fd: RawFd) -> io::Result<TcpStream> {
+        let socket = TcpStream {
+            io_context: io_context,
+            fd: fd,
+        };
 
-struct TcpListener<'a> {
-    io_context: &'a IoContext,
-    fd: RawFd,
-}
-
-impl<'a> TcpListener<'a> {
-    fn bind<A: ToSocketAddrs>(io_context: &'a IoContext, addrs: A) -> io::Result<TcpListener> {
-        let fd = try!(socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), 0));
         try!(set_nonblock(fd));
+        try!(io_context.register_socket(fd));
 
+        Ok(socket)
+    }
+
+    pub fn async_read(&self) {}
+}
+
+pub struct TcpListener<'ctx> {
+    io_context: &'ctx IoContext,
+    fd: RawFd,
+}
+
+impl<'ctx> TcpListener<'ctx> {
+    pub fn bind<A: net::ToSocketAddrs>(io_context: &'ctx IoContext,
+                                       addrs: A)
+                                       -> io::Result<TcpListener> {
+
+        let fd = try!(socket::socket(socket::AddressFamily::Inet,
+                                     socket::SockType::Stream,
+                                     socket::SockFlag::empty(),
+                                     0));
         let listener = TcpListener {
             io_context: io_context,
             fd: fd,
         };
 
-        for addr in addrs.to_socket_addrs() {
-            try!(bind(fd, &addr));
+        try!(set_nonblock(fd));
+
+        for addr in addrs.to_socket_addrs().unwrap() {
+            let addr = socket::SockAddr::Inet(socket::InetAddr::from_std(&addr));
+            try!(socket::bind(fd, &addr));
         }
 
-        try!(listen(fd, 128));
-        try!(io_context.register_socket(fd, EventFilter::EVFILT_READ));
+        try!(socket::listen(fd, 128));
+        try!(io_context.register_socket(fd));
 
         Ok(listener)
     }
 
-    fn accept_async<F>(&self, func: F)
-        where F: FnOnce(io::Result<(TcpStream, SocketAddr)>)
+    pub fn accept_async<F>(&self, func: F)
+        where F: FnOnce(io::Result<(TcpStream, net::SocketAddr)>)
     {
         ;
-    }
-}
-
-impl FromRawFd for TcpListener {
-    unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        let socket = TcpListener { fd: fd };
     }
 }

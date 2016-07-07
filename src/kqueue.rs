@@ -21,7 +21,7 @@ impl Reactor {
         Ok(Reactor { fd: try!(kqueue()) })
     }
 
-    pub fn register_socket(&mut self, fd: RawFd) -> nix::Result<Box<DescriptorState>> {
+    pub fn register_socket(&self, fd: RawFd) -> nix::Result<Box<DescriptorState>> {
         let state = Box::new(DescriptorState { wait_queue: [Vec::new(), Vec::new()] });
 
         macro_rules! event {
@@ -41,7 +41,7 @@ impl Reactor {
         kevent(self.fd, &changelist, &mut [], 0).and(Ok(state))
     }
 
-    pub fn poll(&self, list: &mut [KEvent], timeout: usize) -> nix::Result<()> {
+    pub fn poll(&self, timeout: usize) -> nix::Result<()> {
         let mut eventlist: [KEvent; 128] = unsafe { mem::uninitialized() };
         let nevents = try!(kevent(self.fd, &[], &mut eventlist, timeout)) as usize;
 

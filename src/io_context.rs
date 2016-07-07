@@ -21,7 +21,7 @@ impl IoContext {
         Ok(IoContext { reactor: try!(Reactor::new()) })
     }
 
-    pub fn register_socket(&mut self, fd: RawFd) -> io::Result<Box<DescriptorState>> {
+    pub fn register_socket(&self, fd: RawFd) -> io::Result<Box<DescriptorState>> {
         into_io_result(self.reactor.register_socket(fd))
     }
 

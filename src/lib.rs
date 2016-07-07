@@ -38,7 +38,8 @@ mod kqueue;
 ))]
 pub use self::kqueue::{Reactor, DescriptorState};
 
+mod io_context;
+mod net;
 mod operation;
 
-mod io_context;
 pub use io_context::IoContext;
